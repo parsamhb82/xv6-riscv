@@ -8,6 +8,11 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+struct child_processes;
+struct report_traps;
+struct thread;
+struct stack;
+
 
 // bio.c
 void            binit(void);
@@ -33,6 +38,7 @@ void            fileinit(void);
 int             fileread(struct file*, uint64, int n);
 int             filestat(struct file*, uint64 addr);
 int             filewrite(struct file*, uint64, int n);
+int             fileseek(struct file*, int, int);
 
 // fs.c
 void            fsinit(int);
@@ -106,6 +112,13 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+int             child_processes(struct child_processes*);
+int             myrep(struct report_traps*);
+int             sysrep(struct report_traps *rt);
+int             create_thread(void *(*)(void *), void *, void *);
+int             join_thread(int);
+int             stop_thread(int);
+int             thread_cleanup(int tid);
 
 // swtch.S
 void            swtch(struct context*, struct context*);
@@ -140,6 +153,7 @@ void            argaddr(int, uint64 *);
 int             fetchstr(uint64, char*, int);
 int             fetchaddr(uint64, uint64*);
 void            syscall();
+
 
 // trap.c
 extern uint     ticks;

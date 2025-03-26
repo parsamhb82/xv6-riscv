@@ -21,6 +21,7 @@ struct context {
 // Per-CPU state.
 struct cpu {
   struct proc *proc;          // The process running on this cpu, or null.
+  struct thread *thread;
   struct context context;     // swtch() here to enter scheduler().
   int noff;                   // Depth of push_off() nesting.
   int intena;                 // Were interrupts enabled before push_off()?
@@ -79,6 +80,21 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
+enum thread_state {
+  THREAD_FREE,
+  THREAD_RUNNABLE,
+  THREAD_RUNNING,
+  THREAD_JOINED
+};
+
+struct thread {
+  enum thread_state state;
+  struct trapframe *trapframe;
+  struct cpu *cpu;
+  uint id;
+  uint join;
+};
+
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // Per-process state
@@ -104,4 +120,27 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  // threads
+  struct thread threads[MAX_THREAD];
+  int last_running_thread_index;
+  int running_threads_count;
+};
+
+
+struct proc_info {
+  char name[16];
+  int pid;
+  int ppid;
+  enum procstate state;
+};
+
+struct child_processes {
+  int count;
+  struct proc_info processes[NPROC];
+};
+
+struct stack {
+  uint64 mem;
+  uint64 size;
 };

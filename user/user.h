@@ -1,4 +1,6 @@
 struct stat;
+struct child_processes;
+struct report_traps;
 
 // system calls
 int fork(void);
@@ -22,6 +24,13 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+int child_processes(struct child_processes*);
+int myrep(struct report_traps*);
+int seek(int, int, int);
+int sysrep(struct report_traps*);
+int create_thread(void *(*)(void *), void *, void *);
+int join_thread(int);
+int stop_thread(int);
 
 // ulib.c
 int stat(const char*, struct stat*);
@@ -41,3 +50,6 @@ void *memcpy(void *, const void *, uint);
 // umalloc.c
 void* malloc(uint);
 void free(void*);
+
+// cp.c
+int print_child_processes();

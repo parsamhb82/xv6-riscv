@@ -2,9 +2,14 @@
 #include "param.h"
 #include "memlayout.h"
 #include "riscv.h"
-#include "spinlock.h"
-#include "proc.h"
 #include "defs.h"
+#include <stddef.h>
+#include "trap.h"
+#include "proc.h"
+#include "stat.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "kfile.h"
 
 struct cpu cpus[NCPU];
 
@@ -14,6 +19,9 @@ struct proc *initproc;
 
 int nextpid = 1;
 struct spinlock pid_lock;
+
+int nexttid = 1;
+struct spinlock tid_lock;
 
 extern void forkret(void);
 static void freeproc(struct proc *p);
@@ -50,6 +58,7 @@ procinit(void)
   struct proc *p;
   
   initlock(&pid_lock, "nextpid");
+  initlock(&tid_lock, "nexttid");
   initlock(&wait_lock, "wait_lock");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
@@ -102,6 +111,17 @@ allocpid()
   return pid;
 }
 
+int alloctid() {
+  int tid;
+
+  acquire(&tid_lock);
+  tid = nexttid;
+  nexttid++;
+  release(&tid_lock);
+
+  return tid;
+}
+
 // Look in the process table for an UNUSED proc.
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
@@ -124,7 +144,11 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->last_running_thread_index = 0;
+  p->running_threads_count = 0;
 
+  memset(p->threads, 0, sizeof(p->threads));
+  
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -434,6 +458,7 @@ wait(uint64 addr)
   }
 }
 
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -448,6 +473,7 @@ scheduler(void)
   struct cpu *c = mycpu();
 
   c->proc = 0;
+  c->thread = 0;
   for(;;){
     // The most recent process to run may have had interrupts
     // turned off; enable them to avoid a deadlock if all
@@ -455,21 +481,74 @@ scheduler(void)
     intr_on();
 
     int found = 0;
+    int temp_found = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
-      if(p->state == RUNNABLE) {
+      struct trapframe *tf;
+      struct trapframe ptf;
+      if (p->state == RUNNABLE) {
+        // just main thread
+        if (p->threads[0].state == THREAD_FREE) {
+          tf = p->trapframe;
+          temp_found = 1;
+        }
+        else {
+          int next_thread = p->last_running_thread_index;
+          struct thread *t;
+          
+          for (int i = 0; i < MAX_THREAD; ++i) {
+            next_thread++;
+
+            if (next_thread >= MAX_THREAD) {
+              next_thread = 0;
+            }
+            
+            t = &p->threads[next_thread];
+
+            if (t->state == THREAD_RUNNABLE) {
+              t->state = THREAD_RUNNING;
+              t->cpu = mycpu();
+              c->thread = t;
+
+              p->last_running_thread_index = next_thread;
+
+              tf = t->trapframe;
+              temp_found = 1;
+              break;
+            }
+          }
+        }
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
         // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+        if (temp_found) {
+          p->state = RUNNING;
+          p->running_threads_count++;
+          c->proc = p;    
+          if (tf != p->trapframe) {
+            ptf = *(p->trapframe);
+            *(p->trapframe) = *tf;
+          }
+          // uvmunmap(p->pagetable, TRAPFRAME, 1, 0);
+          // if(mappages(p->pagetable, TRAPFRAME, PGSIZE,
+          //   (uint64)(tf), PTE_R | PTE_W) < 0){
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+          //   printf("trapframe mapping failed\n");
+            
+          // }
+          swtch(&c->context, &p->context);
+          if (tf != p->trapframe) {
+            *(p->trapframe) = ptf;
+          }
+          // Process is done running for now.
+          // It should have changed its p->state before coming back.
+          c->proc = 0;
+          c->thread = 0;
+          found = 1;
+        
+        }
       }
+      temp_found = 0;
       release(&p->lock);
     }
     if(found == 0) {
@@ -492,17 +571,29 @@ sched(void)
 {
   int intena;
   struct proc *p = myproc();
+  struct thread *t;
 
   if(!holding(&p->lock))
     panic("sched p->lock");
   if(mycpu()->noff != 1)
     panic("sched locks");
-  if(p->state == RUNNING)
+  if(p->state == RUNNING && p->running_threads_count == 0)
     panic("sched running");
   if(intr_get())
     panic("sched interruptible");
 
   intena = mycpu()->intena;
+
+  if ((t = mycpu()->thread) != NULL && t->state != THREAD_FREE) {
+    if (t->trapframe != p->trapframe) {
+      *(t->trapframe) = *(p->trapframe);
+    }
+    if (t->state == THREAD_RUNNING) {
+      t->state = THREAD_RUNNABLE;
+    }
+    t->cpu = NULL;
+  }
+  p->running_threads_count--;
   swtch(&p->context, &mycpu()->context);
   mycpu()->intena = intena;
 }
@@ -692,4 +783,217 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+int child_processes(struct child_processes *cp) {
+  struct proc *current_process = myproc();
+  struct proc *p, *parent;
+  int index = 0;
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    if (p->state == UNUSED) {
+      continue;
+    }
+    parent = p->parent;
+
+    while (parent != NULL) {
+      if (parent == current_process) {
+        cp->count = cp->count + 1;
+        strncpy(cp->processes[index].name, p->name, sizeof(p->name));
+        cp->processes[index].pid = p->pid;
+        cp->processes[index].ppid = p->parent->pid;
+        cp->processes[index].state = p->state;
+        ++index;
+        break;
+      }
+      parent = parent->parent;
+    }
+  }
+
+  return 0;
+}
+
+int myrep(struct report_traps *rt) {
+  struct proc *current_process = myproc();
+
+  acquire(&_internal_report_list.lock);
+
+  // read reports according to time
+  int report_count = _internal_report_list.count;
+  int read_index = (report_count <= REPORT_BUFFER_SIZE) ? 0 : _internal_report_list.write_index;
+
+  for (int i = 0; (i < REPORT_BUFFER_SIZE && i < report_count); ++i) {
+    int anc_count = _internal_report_list.reports[read_index].ancestors_count;
+
+    for (int j = 0; j < anc_count; ++j) {
+
+      if (_internal_report_list.reports[read_index].ancestors[j] == current_process->pid) {
+        rt->reports[rt->count++] = _internal_report_list.reports[read_index];
+        break;
+      }
+      
+    }
+
+    read_index = (read_index + 1) % REPORT_BUFFER_SIZE;
+  }
+  release(&_internal_report_list.lock);
+  return 0;
+}
+
+int sysrep(struct report_traps *rt) {
+  struct file *f = kfilealloc();
+  f->type = FD_INODE;
+  // f->ip = namei("/reports.bin");
+  // printf("size = %d\n", f->ip->size);
+  if (f->ip == NULL) {
+    begin_op();
+    f->ip = kfilecreate("/reports.bin", T_FILE, 0, 0);
+    // f->ip->size = 0;
+    iunlockput(f->ip);
+    end_op();
+    return 0;
+  }
+  // printf("size = %d\n", f->ip->size);
+  f->off = 0;
+  f->readable = 1;
+  f->ref = 1;
+  
+  kfileseek(f, 0, SEEK_SET);
+  kfileread(f, (uint64) &(rt->count), sizeof(int));
+  kfileseek(f, -10 * (int) sizeof(struct report), SEEK_END);
+  for (int i = 0; i < REPORT_BUFFER_SIZE && i < rt->count; ++i) {
+    kfileread(f, (uint64) &rt->reports[i], sizeof(struct report));
+  }
+  kfileclose(f);
+  return 0;
+}
+
+int create_thread(void *(*runner)(void *), void *arg, void *stack) {
+  struct proc *p = myproc();
+  int tid = -1;
+  
+  acquire(&p->lock);
+
+  if (p->threads[0].state == THREAD_FREE) {
+    // add main thread
+    p->threads[0].state = THREAD_RUNNING;
+    p->threads[0].id = alloctid();
+    p->threads[0].join = 0;
+    p->threads[0].trapframe = p->trapframe;
+    p->threads[0].cpu = mycpu();
+    mycpu()->thread = &p->threads[0];
+  }
+
+  for (int i = 0; i < MAX_THREAD; ++i) {
+
+    if (p->threads[i].state == THREAD_FREE) {
+      p->threads[i].state = THREAD_RUNNABLE;
+      p->threads[i].id = alloctid();
+      p->threads[i].join = 0;
+      p->threads[i].trapframe = (struct trapframe *) kalloc();
+      p->threads[i].cpu = NULL;
+
+      // initialize trapframe
+      memset(p->threads[i].trapframe, 0, sizeof(struct trapframe));
+      p->threads[i].trapframe->epc = (uint64) runner;
+      p->threads[i].trapframe->sp = (uint64) stack;  // point to the top of stack
+      p->threads[i].trapframe->a0 = (uint64) arg;
+      p->threads[i].trapframe->ra = (uint64) -1;
+
+      tid = p->threads[i].id;
+
+      break;
+    }
+
+  }
+
+  release(&p->lock);
+  return tid;
+
+}
+
+int join_thread(int tid) {
+  struct proc *p = myproc();
+  struct thread *t;
+
+  acquire(&p->lock);
+
+  for (int i = 0; i < MAX_THREAD; ++i) {
+    if (p->threads[i].id == tid && p->threads[i].state != THREAD_FREE) {
+      t = mycpu()->thread;
+      if (t == NULL) {
+        t = &p->threads[0];
+      }
+
+      t->join = tid;
+      t->state = THREAD_JOINED;
+
+      release(&p->lock);
+      yield();
+      return 0;
+    }
+  }
+
+  // no thread exists with the specified thread ID (tid)
+  release(&p->lock);
+  return -1;
+}
+
+int thread_cleanup(int tid) {
+  struct proc *p = myproc();
+  struct thread *t;
+
+  acquire(&p->lock);
+
+  for (t = &p->threads[0]; t < &p->threads[MAX_THREAD]; ++t) {
+    if (t->id == tid) {
+
+      if (t->state != THREAD_FREE) {
+        t->cpu = NULL;
+        t->state = THREAD_FREE;
+        kfree(t->trapframe);
+
+        // main thread cleaning up terminates the whole process
+        if (t->id == 1) {
+          for (int i = 0; i < MAX_THREAD; ++i) {
+            if (p->threads[i].state != THREAD_FREE) {
+              kfree(p->threads[i].trapframe);
+            }
+          }
+          release(&p->lock);
+          exit(0);
+          return 0;
+        }
+
+        // wakeup joined threads
+        for (int i = 0; i < MAX_THREAD; ++i) {
+          if (p->threads[i].state == THREAD_JOINED && p->threads[i].join == t->id) {
+              p->threads[i].join = 0;
+              p->threads[i].state = THREAD_RUNNABLE;
+          }
+        }
+      }
+
+      release(&p->lock);
+      yield();
+      return 0;
+    }
+  }
+
+  release(&p->lock);
+  return -1;
+}
+
+int stop_thread(int tid) {
+  struct thread *t;
+
+  // stop running thread
+  if (tid == -1) {
+    if ((t = mycpu()->thread) != NULL) {
+      thread_cleanup(t->id);
+    }
+    return 0;
+  }
+
+  return thread_cleanup(tid);
 }

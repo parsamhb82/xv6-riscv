@@ -3,7 +3,7 @@
 #include "defs.h"
 #include "param.h"
 #include "memlayout.h"
-#include "spinlock.h"
+#include "trap.h"
 #include "proc.h"
 
 uint64
@@ -90,4 +90,65 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64 sys_child_processes(void) {
+  struct child_processes *cp;
+  struct child_processes kcp;
+  argaddr(0, (uint64 *) &cp);
+  struct proc *p = myproc();
+  copyin(p->pagetable, (char *) &kcp, (uint64) cp, sizeof(kcp));
+  int xstat = child_processes(&kcp);
+  copyout(p->pagetable, (uint64) cp, (char *) &kcp, sizeof(kcp));
+  return xstat;
+}
+
+uint64 sys_myrep(void) {
+  struct report_traps *rt;
+  struct report_traps krt;
+  argaddr(0, (uint64 *) &rt);
+  struct proc *p = myproc();
+  copyin(p->pagetable, (char *) &krt, (uint64) rt, sizeof(krt));
+  int xstat = myrep(&krt);
+  copyout(p->pagetable, (uint64) rt, (char *) &krt, sizeof(krt));
+  return xstat;
+}
+
+uint64 sys_sysrep(void) {
+  struct report_traps *rt;
+  struct report_traps krt;
+  argaddr(0, (uint64 *) &rt);
+  struct proc *p = myproc();
+  copyin(p->pagetable, (char *) &krt, (uint64) rt, sizeof(krt));
+  int xstat = sysrep(&krt);
+  copyout(p->pagetable, (uint64) rt, (char *) &krt, sizeof(krt));
+  return xstat;
+}
+
+uint64 sys_create_thread(void) {
+  void *(*runner)(void *);
+  void *arg;
+  void *stack;
+  
+  argaddr(0, (uint64 *) &runner);
+  argaddr(1, (uint64 *) &arg);
+  argaddr(2, (uint64 *) &stack); 
+  
+  return create_thread(runner, (void *) arg, (void *) stack);
+}
+
+uint64 sys_join_thread(void) {
+  int tid;
+
+  argint(0, &tid);
+
+  return join_thread(tid);
+}
+
+uint64 sys_stop_thread(void) {
+  int tid;
+
+  argint(0, &tid);
+
+  return stop_thread(tid);
 }
