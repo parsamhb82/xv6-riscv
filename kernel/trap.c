@@ -2,9 +2,16 @@
 #include "param.h"
 #include "memlayout.h"
 #include "riscv.h"
-#include "spinlock.h"
-#include "proc.h"
 #include "defs.h"
+#include "trap.h"
+#include "proc.h"
+#include <stddef.h>
+#include "sleeplock.h"
+#include "fs.h"
+#include "kfile.h"
+#include "stat.h"
+
+struct internal_report_list _internal_report_list;
 
 struct spinlock tickslock;
 uint ticks;
@@ -15,6 +22,8 @@ extern char trampoline[], uservec[], userret[];
 void kernelvec();
 
 extern int devintr();
+extern void log_trap();
+extern void cleanup();
 
 void
 trapinit(void)
@@ -68,8 +77,16 @@ usertrap(void)
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
+
+    if (p->trapframe->ra == (uint64) -1) {
+      cleanup();
+      usertrapret();
+      return;
+    }
+
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+    log_trap();
     setkilled(p);
   }
 
@@ -216,3 +233,63 @@ devintr()
   }
 }
 
+void store_trap(struct report r) {
+  struct file *f = kfilealloc();
+  f->type = FD_INODE;
+  // f->ip = namei("/reports.bin");
+  if (f->ip == NULL) {
+    begin_op();
+    f->ip = kfilecreate("/reports.bin", T_FILE, 0, 0);
+    end_op();
+  }
+  f->off = 0;
+  f->writable = 1;
+  f->ref = 1;
+
+  acquire(&_internal_report_list.lock);
+
+  int wi = _internal_report_list.write_index;
+  _internal_report_list.reports[wi] = r;
+  _internal_report_list.count++;
+  int count = _internal_report_list.count;
+  _internal_report_list.write_index = (wi + 1) % REPORT_BUFFER_SIZE;
+
+  release(&_internal_report_list.lock);
+
+  // f->ip->size = sizeof(count) + sizeof(struct report) * _internal_report_list.count;
+  kfileseek(f, 0, SEEK_SET);
+  kfilewrite(f, (uint64) &count, sizeof(count));
+  
+  kfileseek(f, 0, SEEK_END);
+  kfilewrite(f, (uint64) &r, sizeof(r));
+
+  kfileclose(f);
+}
+
+void log_trap() {
+  struct proc *p = myproc();
+  struct report r;
+
+  strncpy(r.pname, p->name, sizeof(p->name));
+  r.pid = p->pid;
+  r.sepc = r_sepc();
+  r.stval = r_stval();
+  r.scause = r_scause();
+  struct proc *parent = p->parent;
+  int ac = 0;
+  while (parent != NULL) {
+    r.ancestors[ac] = parent->pid;
+    parent = parent->parent;
+    ac++;
+  }
+  r.ancestors_count = ac;
+
+  store_trap(r);
+}
+
+void cleanup() {
+  struct thread *t;
+  if ((t = mycpu()->thread) != NULL) {
+    thread_cleanup(t->id);
+  }
+}

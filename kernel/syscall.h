@@ -20,3 +20,10 @@
 #define SYS_link   19
 #define SYS_mkdir  20
 #define SYS_close  21
+#define SYS_child_processes 22
+#define SYS_myrep           23
+#define SYS_seek            24
+#define SYS_sysrep          25
+#define SYS_create_thread   26
+#define SYS_join_thread     27
+#define SYS_stop_thread     28
