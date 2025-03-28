@@ -1,0 +1,5 @@
+fs.img
+*.o
+*.d
+*.sym
+*.asm
