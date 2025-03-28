@@ -3,7 +3,6 @@
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
-
 // Parsed command representation
 #define EXEC  1
 #define REDIR 2
@@ -13,6 +12,23 @@
 
 #define MAXARGS 10
 
+typedef unsigned int size_t;
+
+
+
+int my_strncmp(const char *s1, const char *s2, size_t n) {
+  while (n-- > 0) {
+      if (*s1 != *s2) {
+          return (unsigned char)*s1 - (unsigned char)*s2;
+      }
+      if (*s1 == '\0') {
+          break;
+      }
+      s1++;
+      s2++;
+  }
+  return 0;  
+}
 struct cmd {
   int type;
 };
@@ -76,6 +92,24 @@ runcmd(struct cmd *cmd)
     ecmd = (struct execcmd*)cmd;
     if(ecmd->argv[0] == 0)
       exit(1);
+
+    if (ecmd->argv[0] && ecmd->argv[0][0] == '!'){
+      char *message = ecmd->argv[0] + 1;
+
+      char *ptr = message;
+      while (*ptr)
+      {
+        if (my_strncmp(ptr, "os", 2) == 0) {
+          fprintf(2, "\033[34m%s\033[0m", "os"); // Print "os" in blue
+          ptr += 2;
+        } else {
+          write(2, ptr, 1); 
+          ptr++;
+      }
+      }
+      fprintf(2, "\n");
+      exit(0);
+    }
     exec(ecmd->argv[0], ecmd->argv);
     fprintf(2, "exec %s failed\n", ecmd->argv[0]);
     break;
