@@ -3,6 +3,7 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "defs.h"
+#include "custom_logger.h"
 
 volatile static int started = 0;
 
@@ -14,7 +15,7 @@ main()
     consoleinit();
     printfinit();
     printf("\n");
-    printf("xv6 kernel is booting\n");
+    log_message(INFO, "xv6 kernel is booting");
     printf("\n");
     kinit();         // physical page allocator
     kvminit();       // create kernel page table
@@ -29,6 +30,10 @@ main()
     fileinit();      // file table
     virtio_disk_init(); // emulated hard disk
     userinit();      // first user process
+
+    log_message(WARN, "This is a test warning message for the custom logger");
+
+
     __sync_synchronize();
     started = 1;
   } else {
@@ -41,5 +46,7 @@ main()
     plicinithart();   // ask PLIC for device interrupts
   }
 
+  
+  log_message(ERROR, "This is a test error message from the custom logger");
   scheduler();        
 }
