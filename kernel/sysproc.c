@@ -91,3 +91,8 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64 sys_trigger(void) {
+  printf("INFO - This is a log to test a new xv6 system call\n");
+  return 0;
+}
