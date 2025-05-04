@@ -94,21 +94,35 @@ runcmd(struct cmd *cmd)
       exit(1);
 
     if (ecmd->argv[0] && ecmd->argv[0][0] == '!'){
-      char *message = ecmd->argv[0] + 1;
+      char message[512];
+        int msg_idx = 0;
+        
+        // Combine all arguments after '!' (original code)
+        char *first_arg = ecmd->argv[0] + 1;
+        while (*first_arg && msg_idx < sizeof(message)-1) {
+            message[msg_idx++] = *first_arg++;
+        }
+        for (int i = 1; ecmd->argv[i] && msg_idx < sizeof(message)-1; i++) {
+            if (msg_idx > 0) message[msg_idx++] = ' ';
+            char *arg = ecmd->argv[i];
+            while (*arg && msg_idx < sizeof(message)-1) {
+                message[msg_idx++] = *arg++;
+            }
+        }
+        message[msg_idx] = '\0';
 
-      char *ptr = message;
-      while (*ptr)
-      {
-        if (my_strncmp(ptr, "os", 2) == 0) {
-          fprintf(2, "\033[34m%s\033[0m", "os"); // Print "os" in blue
-          ptr += 2;
-        } else {
-          write(2, ptr, 1); 
-          ptr++;
-      }
-      }
-      fprintf(2, "\n");
-      exit(0);
+        // Modified processing loop
+        for (char *ptr = message; *ptr; ptr++) {
+            if (ptr[0] == 'o' && ptr[1] == 's') {
+                printf("\033[34mos\033[0m");
+                ptr++;
+            } else {
+              write(1, ptr, 1); 
+            }
+        }
+        printf("\n");
+        exit(0);
+        
     }
     exec(ecmd->argv[0], ecmd->argv);
     fprintf(2, "exec %s failed\n", ecmd->argv[0]);
