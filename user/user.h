@@ -41,3 +41,8 @@ void *memcpy(void *, const void *, uint);
 // umalloc.c
 void* malloc(uint);
 void free(void*);
+
+//threads user-level functions declaration 
+int thread_create(void (*fcn)(void *), void *arg);
+void thread_exit(void);
+int thread_join(int pid);
