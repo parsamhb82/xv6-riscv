@@ -91,3 +91,30 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+
+//threads syscall handlers
+
+uint64
+sys_thread_create(void)
+{
+  uint64 fptr, arg;
+  argaddr(0, &fptr);
+  argaddr(1, &arg);
+  return thread_create((void *)fptr, (void *)arg);
+}
+
+uint64
+sys_thread_exit(void)
+{
+  thread_exit();
+  return 0;
+}
+
+uint64
+sys_thread_join(void)
+{
+  int pid;
+  argint(0, &pid);
+  return thread_join(pid);
+}
