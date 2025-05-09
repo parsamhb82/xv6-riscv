@@ -693,3 +693,106 @@ procdump(void)
     printf("\n");
   }
 }
+
+// thread create, exit and join functions
+int
+thread_create(void (*start_routine)(void*), void *arg)
+{
+  struct proc *p = myproc();
+  struct proc *nt;
+
+  if((nt = allocproc()) == 0)
+    return -1;
+
+  nt->pagetable = p->pagetable;
+  nt->is_thread = 1;
+  nt->parent = p; // still needed for reaping
+  nt->parent_thread = p;
+
+  for(int i = 0; i < NOFILE; i++)
+    if(p->ofile[i])
+      nt->ofile[i] = filedup(p->ofile[i]);
+  nt->cwd = idup(p->cwd);
+
+  safestrcpy(nt->name, p->name, sizeof(p->name));
+
+  // Allocate user stack
+  uint64 ustack = (uint64)kalloc();
+  if (!ustack)
+    return -1;
+  nt->thread_stack = ustack;
+
+  *(nt->trapframe) = *(p->trapframe);
+  nt->trapframe->epc = (uint64)start_routine;
+  nt->trapframe->sp = ustack + PGSIZE;
+  nt->trapframe->sp -= sizeof(uint64);
+  *((uint64 *)nt->trapframe->sp) = (uint64)arg;
+  nt->trapframe->a1 = (uint64)arg;
+
+  nt->state = RUNNABLE;
+  return nt->pid;
+}
+
+
+void
+thread_exit(void)
+{
+  struct proc *p = myproc();
+
+  for(int i = 0; i < NOFILE; i++){
+    if(p->ofile[i]){
+      fileclose(p->ofile[i]);
+      p->ofile[i] = 0;
+    }
+  }
+
+  begin_op();
+  iput(p->cwd);
+  end_op();
+  p->cwd = 0;
+
+  if (p->is_thread && p->thread_stack)
+    kfree((void *)p->thread_stack);
+
+  p->xstate = 0;
+  p->state = ZOMBIE;
+
+  sched();
+  panic("zombie thread");
+}
+
+
+int
+thread_join(int pid)
+{
+  struct proc *p = myproc();
+  struct proc *t;
+
+  acquire(&wait_lock);
+  for(;;) {
+    int found = 0;
+
+    for (t = proc; t < &proc[NPROC]; t++) {
+      if (t->pid == pid && t->parent_thread == p) {
+        found = 1;
+
+        if (t->state == ZOMBIE) {
+          kfree(t->kstack);
+          t->kstack = 0;
+          t->state = UNUSED;
+          release(&wait_lock);
+          return 0;
+        }
+      }
+    }
+
+    if (!found) {
+      release(&wait_lock);
+      return -1;
+    }
+
+    sleep(p, &wait_lock);
+  }
+}
+
+
