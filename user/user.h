@@ -32,15 +32,15 @@ int strcmp(const char*, const char*);
 void fprintf(int, const char*, ...) __attribute__ ((format (printf, 2, 3)));
 void printf(const char*, ...) __attribute__ ((format (printf, 1, 2)));
 char* gets(char*, int max);
-uint strlen(const char*);
-void* memset(void*, int, uint);
+unsigned strlen(const char *s);
+void*    memset(void *dst, int c, unsigned n);
 int atoi(const char*);
-int memcmp(const void *, const void *, uint);
-void *memcpy(void *, const void *, uint);
+int      memcmp(const void *a, const void *b, unsigned n);
+void*    memcpy(void *dst, const void *src, unsigned n);
 
 // umalloc.c
-void* malloc(uint);
-void free(void*);
+void*    malloc(unsigned n);
+void     free(void *ptr);
 
 //threads user-level functions declaration 
 int thread_create(void (*fcn)(void *), void *arg);

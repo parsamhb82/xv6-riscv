@@ -104,10 +104,15 @@ sys_thread_create(void)
   return thread_create((void *)fptr, (void *)arg);
 }
 
+
 uint64
 sys_thread_exit(void)
 {
+  struct proc *p = myproc();
+  acquire(&p->lock); // Acquire the process lock
   thread_exit();
+  // Unreachable code
+  release(&p->lock);
   return 0;
 }
 

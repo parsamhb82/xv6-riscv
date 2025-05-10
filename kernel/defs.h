@@ -187,3 +187,9 @@ void            virtio_disk_intr(void);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+
+//thread functions 
+
+int  thread_create(void (*start_routine)(void *), void *arg);
+void thread_exit(void);
+int  thread_join(int pid);

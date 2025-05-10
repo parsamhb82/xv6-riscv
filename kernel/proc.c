@@ -712,7 +712,7 @@ thread_create(void (*start_routine)(void*), void *arg)
   for(int i = 0; i < NOFILE; i++)
     if(p->ofile[i])
       nt->ofile[i] = filedup(p->ofile[i]);
-  nt->cwd = idup(p->cwd);
+  nt->cwd = idup(p->cwd); 
 
   safestrcpy(nt->name, p->name, sizeof(p->name));
 
@@ -739,29 +739,42 @@ thread_exit(void)
 {
   struct proc *p = myproc();
 
-  for(int i = 0; i < NOFILE; i++){
-    if(p->ofile[i]){
-      fileclose(p->ofile[i]);
-      p->ofile[i] = 0;
-    }
+  // Verify lock is held by the syscall handler
+  if (!holding(&p->lock)) {
+    panic("thread_exit: lock not held");
   }
 
+  // Cleanup: files, cwd, stack
+  for (int fd = 0; fd < NOFILE; fd++) {
+    if (p->ofile[fd]) {
+      fileclose(p->ofile[fd]);
+      p->ofile[fd] = 0;
+    }
+  }
   begin_op();
   iput(p->cwd);
   end_op();
   p->cwd = 0;
 
-  if (p->is_thread && p->thread_stack)
-    kfree((void *)p->thread_stack);
+  acquire(&wait_lock);
+
+  if (p->is_thread && p->thread_stack) {
+    kfree((void*)p->thread_stack);
+    p->thread_stack = 0;
+  }
 
   p->xstate = 0;
   p->state = ZOMBIE;
 
-  sched();
+  wakeup(p->parent_thread);
+  release(&wait_lock);
+
+  // Release the process lock before scheduling out
+  release(&p->lock);
+  sched(); // sched() will handle lock internally
+
   panic("zombie thread");
 }
-
-
 int
 thread_join(int pid)
 {
@@ -773,16 +786,19 @@ thread_join(int pid)
     int found = 0;
 
     for (t = proc; t < &proc[NPROC]; t++) {
+      acquire(&t->lock); // Acquire each proc's lock
       if (t->pid == pid && t->parent_thread == p) {
         found = 1;
-
         if (t->state == ZOMBIE) {
-          kfree(t->kstack);
-          t->kstack = 0;
           t->state = UNUSED;
+          release(&t->lock);
           release(&wait_lock);
           return 0;
+        } else {
+          release(&t->lock);
         }
+      } else {
+        release(&t->lock);
       }
     }
 
@@ -794,5 +810,4 @@ thread_join(int pid)
     sleep(p, &wait_lock);
   }
 }
-
 
