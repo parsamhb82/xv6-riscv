@@ -20,6 +20,14 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
+extern char _binary_user_initcode_start[];
+
+
+int create_thread(void (*fcn)(void *), void *arg);
+int join_thread(int thread_id);
+
+
+
 // helps ensure that wakeups of wait()ing
 // parents are not lost. helps obey the
 // memory model when using p->parent.
@@ -233,45 +241,38 @@ void
 userinit(void)
 {
   struct proc *p;
+  struct thread *t;
 
   p = allocproc();
+  if (p == 0)
+    panic("userinit: allocproc failed");
+
   initproc = p;
-  
-  // allocate one user page and copy initcode's instructions
-  // and data into it.
+
+  // تخصیص یک صفحه و کپی کردن initcode
   uvmfirst(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
-  // prepare for the very first "return" from kernel to user.
-  p->trapframe->epc = 0;      // user program counter
-  p->trapframe->sp = PGSIZE;  // user stack pointer
+  // مقداردهی ترد صفر (ترد اصلی)
+  t = &p->threads[0];
+  t->trapframe = p->trapframe;
+  t->state = THREAD_RUNNABLE;
+  t->id = 0;
+  t->joined = 0;
+  t->retval = 0;
+
+  // مقداردهی اولیه stack و pc برای اولین trapframe
+  t->trapframe->epc = (uint64)_binary_user_initcode_start;
+  t->trapframe->sp = PGSIZE;
+
+  p->current_thread = t;
+  p->trapframe = t->trapframe;  // این خط بسیار مهمه ❗❗
+  p->state = RUNNABLE;
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
-
-  p->state = RUNNABLE;
-
+  printf("userinit done\n");
   release(&p->lock);
-}
-
-// Grow or shrink user memory by n bytes.
-// Return 0 on success, -1 on failure.
-int
-growproc(int n)
-{
-  uint64 sz;
-  struct proc *p = myproc();
-
-  sz = p->sz;
-  if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
-      return -1;
-    }
-  } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
-  }
-  p->sz = sz;
-  return 0;
 }
 
 // Create a new process, copying the parent.
@@ -441,6 +442,36 @@ wait(uint64 addr)
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
+
+void
+thread_return()
+{
+  struct proc *p = myproc();
+  struct thread *t = p->current_thread;
+
+  acquire(&p->lock);
+
+  // ذخیره مقدار خروجی تابع ترد در retval
+  t->retval = (void*)t->trapframe->a0;
+
+  // مشخص کردن اتمام ترد
+  t->state = THREAD_JOINED;
+
+  // بیدار کردن کسی که join زده
+  wakeup(t);
+
+  // آزادسازی trapframe
+  if(t->trapframe){
+    kfree((void*)t->trapframe);
+    t->trapframe = 0;
+  }
+
+  release(&p->lock);
+
+  yield(); // چون این ترد تموم شده، خودشو کنار بزنه
+}
+
+
 void
 scheduler(void)
 {
@@ -449,33 +480,30 @@ scheduler(void)
 
   c->proc = 0;
   for(;;){
-    // The most recent process to run may have had interrupts
-    // turned off; enable them to avoid a deadlock if all
-    // processes are waiting.
     intr_on();
 
-    int found = 0;
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+        for(int i = 0; i < MAX_THREAD; i++){
+          struct thread *t = &p->threads[i];
+          if(t->state == THREAD_RUNNABLE){
+            t->state = THREAD_RUNNING;
+            p->current_thread = t;
+            p->trapframe = t->trapframe;
+            c->proc = p;
+            p->state = RUNNING;
 
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+            swtch(&c->context, &p->context);
+            printf("returned to scheduler\n");
+
+
+            c->proc = 0;
+            break;
+          }
+        }
       }
       release(&p->lock);
-    }
-    if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
-      intr_on();
-      asm volatile("wfi");
     }
   }
 }
@@ -692,4 +720,141 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+
+int
+create_thread(void (*fcn)(void *), void *arg)
+{
+  struct proc *p = myproc();
+  acquire(&p->lock);
+
+  // پیدا کردن یک خانه آزاد برای ترد جدید
+  int tid = -1;
+  for (int i = 0; i < MAX_THREAD; i++) {
+    if (p->threads[i].state == THREAD_FREE) {
+      tid = i;
+      break;
+    }
+  }
+
+  if (tid == -1) {
+    release(&p->lock);
+    return -1; // جای خالی نیست
+  }
+
+  struct thread *t = &p->threads[tid];
+  t->trapframe = (struct trapframe *)kalloc();
+  if (t->trapframe == 0) {
+    release(&p->lock);
+    return -1;
+  }
+
+  memset(t->trapframe, 0, PGSIZE);
+
+  // تنظیم رجیسترهای اولیه trapframe
+  t->trapframe->epc = (uint64)fcn;      // آدرس شروع تابع ترد
+  t->trapframe->sp = p->sz;             // بالای فضای یوزر فعلی → آدرس استک
+  t->trapframe->a0 = (uint64)arg;       // پارامتر ورودی
+  t->trapframe->ra = (uint64) thread_return;
+
+  // فضای استک جدید برای این ترد رزرو شود
+  if(growproc(PGSIZE) < 0){
+    kfree(t->trapframe);
+    t->trapframe = 0;
+    release(&p->lock);
+    return -1;
+  }
+
+  t->id = tid;
+  t->state = THREAD_RUNNABLE;
+  t->joined = 0;
+  t->retval = 0;
+
+  release(&p->lock);
+  return tid;
+}
+
+
+int
+join_thread(int thread_id)
+{
+  struct proc *p = myproc();
+
+  if(thread_id < 0 || thread_id >= MAX_THREAD)
+    return -1;
+
+  acquire(&p->lock);
+
+  struct thread *t = &p->threads[thread_id];
+
+  if(t->state == THREAD_FREE || t == p->current_thread){
+    release(&p->lock);
+    return -1;
+  }
+
+  // منتظر شو تا ترد به پایان برسه
+  while(t->state != THREAD_JOINED && t->state != THREAD_FREE){
+    sleep(t, &p->lock);  // ترد فعلی منتظر می‌مونه
+  }
+
+  release(&p->lock);
+  return 0;
+}
+
+int
+stop_thread(int thread_id)
+{
+  struct proc *p = myproc();
+  acquire(&p->lock);
+
+  struct thread *t;
+
+  if(thread_id == -1){
+    // متوقف کردن ترد فعلی
+    t = p->current_thread;
+    if(t == 0 || t->state != THREAD_RUNNING){
+      release(&p->lock);
+      return -1;
+    }
+  } else {
+    if(thread_id < 0 || thread_id >= MAX_THREAD){
+      release(&p->lock);
+      return -1;
+    }
+    t = &p->threads[thread_id];
+    if(t->state != THREAD_RUNNABLE && t->state != THREAD_RUNNING){
+      release(&p->lock);
+      return -1;
+    }
+  }
+
+  t->state = THREAD_JOINED; // یا THREAD_FREE بسته به طراحی شما
+  wakeup(t);  // اگر کسی منتظر join بود
+  release(&p->lock);
+
+  if(thread_id == -1){
+    // خودترد را متوقف کن
+    yield();  // یا sched();
+  }
+
+  return 0;
+}
+
+int
+growproc(int n)
+{
+  uint64 sz;
+  struct proc *p = myproc();
+
+  sz = p->sz;
+  if(n > 0){
+    if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
+      return -1;
+    }
+  } else if(n < 0){
+    sz = uvmdealloc(p->pagetable, sz, sz + n);
+  }
+  p->sz = sz;
+  return 0;
 }

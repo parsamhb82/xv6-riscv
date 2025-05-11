@@ -145,3 +145,19 @@ memcpy(void *dst, const void *src, uint n)
 {
   return memmove(dst, src, n);
 }
+
+
+int
+syscall(int num, ...)
+{
+  int ret;
+  asm volatile (
+    "mv a7, %1\n"
+    "ecall\n"
+    "mv %0, a0"
+    : "=r" (ret)
+    : "r" (num)
+    : "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"
+  );
+  return ret;
+}

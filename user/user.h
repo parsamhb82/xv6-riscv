@@ -1,4 +1,7 @@
 struct stat;
+#include "kernel/syscall.h"
+#include "kernel/types.h"
+
 
 // system calls
 int fork(void);
@@ -41,3 +44,22 @@ void *memcpy(void *, const void *, uint);
 // umalloc.c
 void* malloc(uint);
 void free(void*);
+
+int syscall(int num, ...);
+
+
+static inline int
+create_thread(void *(*start_routine)(void *), void *arg)
+{
+  return syscall(SYS_create_thread, start_routine, arg);
+}
+
+static inline int 
+join_thread(int tid) {
+  return syscall(SYS_join_thread, tid);
+}
+
+static inline int
+stop_thread(int tid) {
+  return syscall(SYS_stop_thread, tid);
+}

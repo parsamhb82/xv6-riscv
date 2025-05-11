@@ -1,4 +1,11 @@
+#define MAX_THREAD 4
 // Saved registers for kernel context switches.
+
+int create_thread(void (*fcn)(void *), void *arg);
+int join_thread(int tid);
+int stop_thread(int tid);
+void thread_return();
+
 struct context {
   uint64 ra;
   uint64 sp;
@@ -81,6 +88,21 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+enum threadstate {
+  THREAD_FREE,
+  THREAD_RUNNABLE,
+  THREAD_RUNNING,
+  THREAD_JOINED
+};
+
+struct thread {
+  enum threadstate state;
+  struct trapframe *trapframe;
+  uint id;
+  int joined; 
+  void *retval;
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -104,4 +126,8 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  //threads
+  struct thread threads[MAX_THREAD];
+  struct thread *current_thread;
+
 };
