@@ -21,7 +21,7 @@ static void freeproc(struct proc *p);
 extern char trampoline[]; // trampoline.S
 
 extern char _binary_user_initcode_start[];
-
+extern char _binary_user_initcode_end[];
 
 int create_thread(void (*fcn)(void *), void *arg);
 int join_thread(int thread_id);
@@ -249,11 +249,21 @@ userinit(void)
 
   initproc = p;
 
-  // تخصیص یک صفحه و کپی کردن initcode
-  uvmfirst(p->pagetable, initcode, sizeof(initcode));
+  // Initialize user memory
+  uvmfirst(p->pagetable, (uchar *)_binary_user_initcode_start,
+           _binary_user_initcode_end - _binary_user_initcode_start);
   p->sz = PGSIZE;
 
-  // مقداردهی ترد صفر (ترد اصلی)
+  // Initialize all threads to FREE state
+  for(int i = 0; i < MAX_THREAD; i++) {
+    p->threads[i].state = THREAD_FREE;
+    p->threads[i].trapframe = 0;
+    p->threads[i].id = i;
+    p->threads[i].joined = 0;
+    p->threads[i].retval = 0;
+  }
+
+  // Initialize main thread (thread 0)
   t = &p->threads[0];
   t->trapframe = p->trapframe;
   t->state = THREAD_RUNNABLE;
@@ -261,17 +271,18 @@ userinit(void)
   t->joined = 0;
   t->retval = 0;
 
-  // مقداردهی اولیه stack و pc برای اولین trapframe
+  // Set up initial trapframe for main thread
   t->trapframe->epc = (uint64)_binary_user_initcode_start;
   t->trapframe->sp = PGSIZE;
 
+  // Link process to its main thread
   p->current_thread = t;
-  p->trapframe = t->trapframe;  // این خط بسیار مهمه ❗❗
+  p->trapframe = t->trapframe;
   p->state = RUNNABLE;
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
-  printf("userinit done\n");
+
   release(&p->lock);
 }
 
@@ -303,6 +314,17 @@ fork(void)
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
+  // Initialize thread context for the new process
+  for(i = 0; i < MAX_THREAD; i++) {
+    np->threads[i].state = THREAD_FREE;
+    np->threads[i].trapframe = 0;
+  }
+  
+  // Set up main thread (thread 0)
+  np->threads[0].state = THREAD_RUNNABLE;
+  np->threads[0].trapframe = np->trapframe;
+  np->current_thread = &np->threads[0];
+
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
@@ -312,12 +334,6 @@ fork(void)
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
-
-  release(&np->lock);
-
-  acquire(&wait_lock);
-  np->parent = p;
-  release(&wait_lock);
 
   acquire(&np->lock);
   np->state = RUNNABLE;
@@ -451,24 +467,28 @@ thread_return()
 
   acquire(&p->lock);
 
-  // ذخیره مقدار خروجی تابع ترد در retval
+  // Save return value
   t->retval = (void*)t->trapframe->a0;
 
-  // مشخص کردن اتمام ترد
+  // Mark thread as joined and wake up any waiting threads
   t->state = THREAD_JOINED;
-
-  // بیدار کردن کسی که join زده
   wakeup(t);
 
-  // آزادسازی trapframe
-  if(t->trapframe){
+  // Free trapframe if this is not the main thread (thread 0)
+  if(t->id != 0 && t->trapframe){
     kfree((void*)t->trapframe);
     t->trapframe = 0;
   }
 
+  // If this is the main thread, mark process as zombie
+  if(t->id == 0) {
+    p->state = ZOMBIE;
+  }
+
   release(&p->lock);
 
-  yield(); // چون این ترد تموم شده، خودشو کنار بزنه
+  // Yield CPU to let other threads run
+  yield();
 }
 
 
@@ -485,22 +505,36 @@ scheduler(void)
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
-        for(int i = 0; i < MAX_THREAD; i++){
-          struct thread *t = &p->threads[i];
-          if(t->state == THREAD_RUNNABLE){
-            t->state = THREAD_RUNNING;
-            p->current_thread = t;
-            p->trapframe = t->trapframe;
-            c->proc = p;
-            p->state = RUNNING;
-
-            swtch(&c->context, &p->context);
-            printf("returned to scheduler\n");
-
-
-            c->proc = 0;
+        // Check if process has any runnable threads
+        int has_runnable_thread = 0;
+        for(int i = 0; i < MAX_THREAD; i++) {
+          if(p->threads[i].state == THREAD_RUNNABLE) {
+            has_runnable_thread = 1;
             break;
           }
+        }
+
+        if(has_runnable_thread) {
+          // Find and run a runnable thread
+          for(int i = 0; i < MAX_THREAD; i++) {
+            struct thread *t = &p->threads[i];
+            if(t->state == THREAD_RUNNABLE) {
+              t->state = THREAD_RUNNING;
+              p->current_thread = t;
+              p->trapframe = t->trapframe;
+              c->proc = p;
+              p->state = RUNNING;
+
+              swtch(&c->context, &p->context);
+
+              // Reset CPU's current process
+              c->proc = 0;
+              break;
+            }
+          }
+        } else {
+          // If no runnable threads, mark process as UNUSED
+          p->state = UNUSED;
         }
       }
       release(&p->lock);
@@ -729,7 +763,7 @@ create_thread(void (*fcn)(void *), void *arg)
   struct proc *p = myproc();
   acquire(&p->lock);
 
-  // پیدا کردن یک خانه آزاد برای ترد جدید
+  // Find a free thread slot
   int tid = -1;
   for (int i = 0; i < MAX_THREAD; i++) {
     if (p->threads[i].state == THREAD_FREE) {
@@ -740,31 +774,38 @@ create_thread(void (*fcn)(void *), void *arg)
 
   if (tid == -1) {
     release(&p->lock);
-    return -1; // جای خالی نیست
+    return -1; // No free thread slots
   }
 
   struct thread *t = &p->threads[tid];
+
+  // Allocate trapframe for new thread
   t->trapframe = (struct trapframe *)kalloc();
   if (t->trapframe == 0) {
     release(&p->lock);
     return -1;
   }
 
-  memset(t->trapframe, 0, PGSIZE);
+  // Copy parent thread's trapframe as starting point
+  if(p->current_thread && p->current_thread->trapframe)
+    memmove(t->trapframe, p->current_thread->trapframe, sizeof(struct trapframe));
+  else
+    memset(t->trapframe, 0, sizeof(struct trapframe));
 
-  // تنظیم رجیسترهای اولیه trapframe
-  t->trapframe->epc = (uint64)fcn;      // آدرس شروع تابع ترد
-  t->trapframe->sp = p->sz;             // بالای فضای یوزر فعلی → آدرس استک
-  t->trapframe->a0 = (uint64)arg;       // پارامتر ورودی
-  t->trapframe->ra = (uint64) thread_return;
-
-  // فضای استک جدید برای این ترد رزرو شود
+  // Allocate stack space for new thread
+  uint64 stack = p->sz;
   if(growproc(PGSIZE) < 0){
-    kfree(t->trapframe);
+    kfree((void*)t->trapframe);
     t->trapframe = 0;
     release(&p->lock);
     return -1;
   }
+
+  // Set up thread context
+  t->trapframe->epc = (uint64)fcn;      // Entry point
+  t->trapframe->sp = stack + PGSIZE;     // Stack pointer at top of allocated page
+  t->trapframe->a0 = (uint64)arg;       // First argument
+  t->trapframe->ra = (uint64)thread_return;  // Return address
 
   t->id = tid;
   t->state = THREAD_RUNNABLE;

@@ -165,8 +165,16 @@ main(void)
         fprintf(2, "cannot cd %s\n", buf+3);
       continue;
     }
-    if(fork1() == 0)
+    
+    // Create a new process for command execution
+    int pid = fork1();
+    if(pid == 0) {
+      // Child process
       runcmd(parsecmd(buf));
+      exit(0);  // Ensure child exits after command
+    }
+    
+    // Parent process waits for child
     wait(0);
   }
   exit(0);
