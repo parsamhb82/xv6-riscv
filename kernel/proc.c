@@ -254,31 +254,22 @@ userinit(void)
            _binary_user_initcode_end - _binary_user_initcode_start);
   p->sz = PGSIZE;
 
-  // Initialize all threads to FREE state
-  for(int i = 0; i < MAX_THREAD; i++) {
-    p->threads[i].state = THREAD_FREE;
-    p->threads[i].trapframe = 0;
-    p->threads[i].id = i;
-    p->threads[i].joined = 0;
-    p->threads[i].retval = 0;
-  }
-
-  // Initialize main thread (thread 0)
+  // Grab the “main” thread slot (thread 0) for the init process
   t = &p->threads[0];
-  t->trapframe = p->trapframe;
-  t->state = THREAD_RUNNABLE;
-  t->id = 0;
-  t->joined = 0;
-  t->retval = 0;
+  t->trapframe = p->trapframe;       // share the proc’s trapframe
+  t->state     = THREAD_RUNNABLE;    // mark thread 0 runnable
+  t->id        = 0;                  // TID = 0 for the initial thread
+  t->joined    = 0;                  // no joiner yet
+  t->retval    = 0;                  // will return 0 from fork
 
-  // Set up initial trapframe for main thread
+  // Set up initial trapframe so that when switched in, it jumps to initcode
   t->trapframe->epc = (uint64)_binary_user_initcode_start;
-  t->trapframe->sp = PGSIZE;
+  t->trapframe->sp  = PGSIZE;
 
-  // Link process to its main thread
+  // Link the proc to its main thread, and mark the proc runnable
   p->current_thread = t;
-  p->trapframe = t->trapframe;
-  p->state = RUNNABLE;
+  p->trapframe      = t->trapframe;
+  p->state          = RUNNABLE;      // MARK THE PROCESS RUNNABLE
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
@@ -500,40 +491,48 @@ scheduler(void)
 
   c->proc = 0;
   for(;;){
+    // Enable interrupts on this CPU.  (They were off while we were switching.)
     intr_on();
 
+    // Loop over every process in the proc table.
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if(p->state == RUNNABLE) {
-        // Check if process has any runnable threads
+        // Check if this process has at least one THREAD_RUNNABLE thread.
         int has_runnable_thread = 0;
-        for(int i = 0; i < MAX_THREAD; i++) {
-          if(p->threads[i].state == THREAD_RUNNABLE) {
+        for(int i = 0; i < MAX_THREAD; i++){
+          if(p->threads[i].state == THREAD_RUNNABLE){
             has_runnable_thread = 1;
             break;
           }
         }
 
-        if(has_runnable_thread) {
-          // Find and run a runnable thread
-          for(int i = 0; i < MAX_THREAD; i++) {
+        if(has_runnable_thread){
+          // Pick the first THREAD_RUNNABLE thread and switch to it.
+          for(int i = 0; i < MAX_THREAD; i++){
             struct thread *t = &p->threads[i];
-            if(t->state == THREAD_RUNNABLE) {
+            if(t->state == THREAD_RUNNABLE){
+              // Mark that thread as running
               t->state = THREAD_RUNNING;
               p->current_thread = t;
+              // Make the process’s trapframe point at this thread’s trapframe:
               p->trapframe = t->trapframe;
+              // Tell the CPU which proc is now running
               c->proc = p;
+              // Mark the process RUNNING so that we don’t pick it again
               p->state = RUNNING;
 
+              // Switch to the process’s context (this ultimately enters t’s user mode).
               swtch(&c->context, &p->context);
 
-              // Reset CPU's current process
+              // When this thread yields or exits and we come back here,
+              // clear c->proc and break out to rescan proc table.
               c->proc = 0;
               break;
             }
           }
         } else {
-          // If no runnable threads, mark process as UNUSED
+          // No THREAD_RUNNABLE threads in this process → free the proc slot
           p->state = UNUSED;
         }
       }
@@ -541,7 +540,6 @@ scheduler(void)
     }
   }
 }
-
 // Switch to scheduler.  Must hold only p->lock
 // and have changed proc->state. Saves and restores
 // intena because intena is a property of this
